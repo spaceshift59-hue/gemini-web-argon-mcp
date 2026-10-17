@@ -1,0 +1,7 @@
+{
+  "name": "mcp-gemini-argon",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Servidor MCP para interactuar con Gemini Web (Gemini 4 Argon / Gemini Advanced) vía Chrome CDP",
+  "main": "server.js"
+}
