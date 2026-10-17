@@ -88,6 +88,54 @@ export async function askGeminiWeb(prompt) {
       await new Promise((r) => setTimeout(r, 5000));
     }
 
+    logDebug('Verificando y asegurando modelo Gemini 4 Argon...');
+    const modelSwitchCode = `
+      (async function() {
+        // 1. Localizar el selector de modo
+        const btn = document.querySelector('button[data-test-id="bard-mode-menu-button"], button.input-area-switch');
+        if (!btn) {
+          return { status: 'no_mode_button', text: 'no encontrado' };
+        }
+
+        const currentText = (btn.innerText || btn.getAttribute('aria-label') || '').trim();
+        if (currentText.toLowerCase().includes('argon')) {
+          return { status: 'already_argon', currentText };
+        }
+
+        // 2. Abrir el menú de modos
+        btn.click();
+        await new Promise(r => setTimeout(r, 500));
+
+        // 3. Buscar la opción que contenga Argon (ej: "4 Argon")
+        const menuItems = Array.from(document.querySelectorAll(
+          '[data-test-id*="mode-option"], gem-menu-item, [role="menuitem"], .mat-mdc-menu-item'
+        ));
+
+        const argonItem = menuItems.find(el => {
+          const t = (el.innerText || el.getAttribute('aria-label') || '').toLowerCase();
+          return t.includes('argon');
+        });
+
+        if (argonItem) {
+          argonItem.click();
+          await new Promise(r => setTimeout(r, 700));
+          const updatedText = btn.innerText.trim();
+          return { status: 'switched_to_argon', from: currentText, to: updatedText };
+        }
+
+        // Si no se pudo clickear la opción, cerrar con Escape
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        return { status: 'argon_not_found_in_menu', currentText };
+      })()
+    `;
+
+    const modelCheck = await sendCdpCommand(ws, 'Runtime.evaluate', {
+      expression: modelSwitchCode,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    logDebug('Estado de selección de modelo:', JSON.stringify(modelCheck.result?.value));
+
     logDebug('Buscando caja de texto en Gemini Web...');
     const escapedPrompt = JSON.stringify(prompt);
     const injectCode = `
@@ -112,16 +160,11 @@ export async function askGeminiWeb(prompt) {
         
         if (!el) return { success: false, error: 'No se encontró el campo de texto de Gemini Web' };
         
-        el.focus();
-        if (el.isContentEditable) {
-          el.innerText = ${escapedPrompt};
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-        } else {
-          el.value = ${escapedPrompt};
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
+        if (!el) return { success: false, error: 'No se encontró el campo de texto de Gemini Web' };
         
+        el.focus();
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
         return { success: true };
       })()
     `;
@@ -143,12 +186,26 @@ export async function askGeminiWeb(prompt) {
       throw new Error('No se pudo encontrar el editor de texto de Gemini. ¿Iniciaste sesión en gemini.google.com en esa ventana de Chrome?');
     }
 
-    logDebug('Enviando mensaje...');
-    await new Promise((r) => setTimeout(r, 500));
+    // Capturar el estado de respuestas previo antes de enviar para evitar lecturas cacheadas
+    const preSendCheck = await sendCdpCommand(ws, 'Runtime.evaluate', {
+      expression: `(() => {
+        const els = document.querySelectorAll('message-content');
+        return { count: els.length, text: els.length > 0 ? els[els.length - 1].innerText.trim() : '' };
+      })()`,
+      returnByValue: true
+    });
+    const initialCount = preSendCheck.result?.value?.count || 0;
+    const initialLastText = preSendCheck.result?.value?.text || '';
 
-    const clickSendCode = `
-      (function() {
+    logDebug('Insertando texto mediante Input.insertText de CDP...');
+    await sendCdpCommand(ws, 'Input.insertText', { text: prompt });
+    await new Promise((r) => setTimeout(r, 400));
+
+    logDebug('Enviando mensaje mediante click nativo de mouse...');
+    const getCoordsCode = `
+      (() => {
         const sendButtons = [
+          'button[aria-label*="Enviar mensaje"]',
           'button[aria-label*="Enviar"]',
           'button[aria-label*="Send"]',
           'button.send-button',
@@ -157,29 +214,50 @@ export async function askGeminiWeb(prompt) {
         ];
         for (const sel of sendButtons) {
           const btn = document.querySelector(sel);
-          if (btn && !btn.disabled) {
+          if (btn && !btn.disabled && btn.offsetParent !== null) {
             btn.click();
-            return { clicked: true, method: 'click' };
+            const rect = btn.getBoundingClientRect();
+            return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
           }
         }
-        
-        const active = document.activeElement;
-        if (active) {
-          active.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-          return { clicked: true, method: 'enter' };
-        }
-        return { clicked: false };
+        return { found: false };
       })()
     `;
 
-    const sendRes = await sendCdpCommand(ws, 'Runtime.evaluate', {
-      expression: clickSendCode,
+    const coordsRes = await sendCdpCommand(ws, 'Runtime.evaluate', {
+      expression: getCoordsCode,
       returnByValue: true,
     });
-    logDebug('Resultado de envío:', JSON.stringify(sendRes.result.value));
+
+    if (coordsRes.result?.value?.found) {
+      const { x, y } = coordsRes.result.value;
+      logDebug('Disparando click nativo de mouse vía CDP en coords:', Math.round(x), Math.round(y));
+      await sendCdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await sendCdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+      await new Promise((r) => setTimeout(r, 100));
+      await sendCdpCommand(ws, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+    } else {
+      logDebug('Botón no clickeable, enviando Enter nativo vía CDP...');
+      await sendCdpCommand(ws, 'Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+        unmodifiedText: '\\r',
+        text: '\\r'
+      });
+      await sendCdpCommand(ws, 'Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13
+      });
+    }
 
     logDebug('Esperando generación de respuesta...');
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2500));
 
     const waitForCompletionCode = `
       (function() {
@@ -188,7 +266,7 @@ export async function askGeminiWeb(prompt) {
         );
 
         const responseEls = document.querySelectorAll(
-          'model-response, .model-response-text, message-content, .markdown'
+          'message-content, model-response, .model-response-text'
         );
         
         let lastText = '';
@@ -197,8 +275,11 @@ export async function askGeminiWeb(prompt) {
           lastText = lastEl.innerText || lastEl.textContent || '';
         }
 
+        const isNew = (responseEls.length > ${initialCount}) || (lastText.trim() !== ${JSON.stringify(initialLastText)});
+
         return {
           isGenerating: isGenerating,
+          isNew: isNew,
           textLength: lastText.trim().length,
           lastText: lastText.trim()
         };
@@ -216,7 +297,7 @@ export async function askGeminiWeb(prompt) {
       });
 
       const val = state.result.value || {};
-      if (!val.isGenerating && val.textLength > 0) {
+      if (val.isNew && !val.isGenerating && val.textLength > 30) {
         if (val.textLength === prevLength) {
           stableCount++;
           if (stableCount >= 2) {
