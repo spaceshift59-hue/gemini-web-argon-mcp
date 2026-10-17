@@ -58,4 +58,16 @@ Agrega la siguiente configuración a tu archivo de configuración MCP (por ejemp
 
 ## 🧰 Herramientas Expuestas
 
-* **`gemini_web_ask`**: Envía una consulta o instrucción a Gemini Web (Gemini Argon), espera a que el modelo razone y finalice la generación, y devuelve el texto completo de la respuesta al agente.
+* **`gemini_web_ask`**: Envía una consulta o instrucción a Gemini Web, espera a que el modelo razone y finalice la generación, y devuelve el texto completo de la respuesta al agente.
+
+---
+
+## ✨ Características Avanzadas
+
+1. **Conmutación Automática a Gemini 4 Argon:**
+   * Cada vez que se envía un prompt, el servidor verifica el selector de modos de Gemini Web y conmuta automáticamente a **4 Argon** si el chat estuviera en Flash o Pro por defecto.
+2. **Detección Preventiva de Límite de Cuota:**
+   * Si la cuota de Argon se ha agotado en tu cuenta, el servidor lo detecta en el menú antes de enviar el prompt y te alerta inmediatamente con el horario o motivo indicado por Google.
+   * Si Google devuelve un mensaje de corte durante la generación, el servidor intercepta la respuesta y te muestra un aviso destacado (`🚨 [AVISO DE CUOTA AGOTADA]`).
+3. **Contador de Consultas por Sesión:**
+   * Cada respuesta exitosa incluye un badge al pie indicando el número correlativo de consulta (`📊 [Sesión MCP]: Consulta #N con Gemini 4 Argon`), permitiéndote controlar el consumo de tu cuota.

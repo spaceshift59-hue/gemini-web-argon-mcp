@@ -1,6 +1,7 @@
 import readline from 'node:readline';
 
 const CDP_PORT = 9222;
+let sessionArgonPromptCount = 0;
 
 function logDebug(...args) {
   process.stderr.write(`[gemini-web-mcp] ${args.join(' ')}\n`);
@@ -98,11 +99,8 @@ export async function askGeminiWeb(prompt) {
         }
 
         const currentText = (btn.innerText || btn.getAttribute('aria-label') || '').trim();
-        if (currentText.toLowerCase().includes('argon')) {
-          return { status: 'already_argon', currentText };
-        }
 
-        // 2. Abrir el menú de modos
+        // 2. Abrir el menú de modos para validar cuota y estado real
         btn.click();
         await new Promise(r => setTimeout(r, 500));
 
@@ -117,14 +115,30 @@ export async function askGeminiWeb(prompt) {
         });
 
         if (argonItem) {
+          const itemText = (argonItem.innerText || argonItem.getAttribute('aria-label') || '').trim();
+          const isLimitReached = (
+            argonItem.hasAttribute('disabled') ||
+            argonItem.classList.contains('disabled') ||
+            argonItem.getAttribute('aria-disabled') === 'true' ||
+            /(l[ií]mite|agotad|disponible de nuevo|try again later|limit reached|come back later)/i.test(itemText)
+          );
+
+          if (isLimitReached) {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+            return { status: 'argon_quota_exceeded', details: itemText };
+          }
+
           argonItem.click();
           await new Promise(r => setTimeout(r, 700));
           const updatedText = btn.innerText.trim();
-          return { status: 'switched_to_argon', from: currentText, to: updatedText };
+          return { status: 'switched_to_argon', from: currentText, to: updatedText, details: itemText };
         }
 
-        // Si no se pudo clickear la opción, cerrar con Escape
+        // Si no se encontró en el menú pero el botón ya decía Argon, continuar
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        if (currentText.toLowerCase().includes('argon')) {
+          return { status: 'already_argon', currentText };
+        }
         return { status: 'argon_not_found_in_menu', currentText };
       })()
     `;
@@ -135,6 +149,11 @@ export async function askGeminiWeb(prompt) {
       returnByValue: true,
     });
     logDebug('Estado de selección de modelo:', JSON.stringify(modelCheck.result?.value));
+
+    if (modelCheck.result?.value?.status === 'argon_quota_exceeded') {
+      const details = modelCheck.result.value.details || '';
+      return `⚠️ [ALERTA DE CUOTA AGOTADA EN GEMINI ARGON]\nGoogle indica que has alcanzado el límite de uso para el modelo 4 Argon en la web.\nDetalle mostrado por Gemini: "${details}"\n\n💡 Sugerencia: Puedes esperar el reinicio de cuota o utilizar temporalmente Gemini Flash en la web.`;
+    }
 
     logDebug('Buscando caja de texto en Gemini Web...');
     const escapedPrompt = JSON.stringify(prompt);
@@ -325,6 +344,14 @@ export async function askGeminiWeb(prompt) {
         returnByValue: true,
       });
       finalResponse = fallback.result.value;
+    }
+
+    const quotaRegex = /(has alcanzado el l[ií]mite|l[ií]mite alcanzado para este modelo|you'?ve reached your limit|superado el l[ií]mite|prueba con gemini flash|l[ií]mite de mensajes)/i;
+    if (quotaRegex.test(finalResponse)) {
+      finalResponse = `🚨 [AVISO DE CUOTA AGOTADA EN GEMINI ARGON]\nGoogle indica que has alcanzado el límite de uso:\n\n${finalResponse}\n\n💡 Sugerencia: Puedes esperar el reinicio de la ventana de cuota o utilizar temporalmente Gemini Flash en la web.`;
+    } else {
+      sessionArgonPromptCount++;
+      finalResponse = `${finalResponse}\n\n---\n📊 [Sesión MCP]: Consulta #${sessionArgonPromptCount} con Gemini 4 Argon.`;
     }
 
     return finalResponse;
